@@ -1,0 +1,7 @@
+# Scratch files that get left around
+*.log
+*.pyc
+*.egg-info
+__pycache__
+build
+dist

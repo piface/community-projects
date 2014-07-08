@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""
+    Get your weather from a weather station just blocks from your home.
+    Go to http://www.wunderground.com/wundermap/ to find a station near you!
+"""
+
+from sys import argv, exc_info, version_info
+if version_info[0] < 3:
+    print('Weather only works with python3.')
+    exit(1)
+
+import logging
+from argparse import ArgumentParser
+from configparser import ConfigParser
+from os.path import exists
+from time import sleep
+
+from pifacecad import IODIR_ON, PiFaceCAD, SwitchEventListener
+from wunderpi import WeatherDisplay, WeatherStation
+
+
+VERSION = '0.1.0'
+logger = logging.getLogger('wunderpi')
+logger.setLevel(logging.DEBUG)
+
+# Parse command line arguments
+parser = ArgumentParser(description=__doc__)
+parser.add_argument('config_file', default='/etc/flexible_weather.conf', nargs='?')
+parser.add_argument('--refresh', '-r', type=int, default=300, help='how long to wait between updates')
+parser.add_argument('--station', '-s', type=int, default=0, help='index for the initial station')
+parser.add_argument('--log-file', help='file to log to')
+parser.add_argument('--verbose', '-v', action='store_true', help='verbose output, useful for debugging')
+parser.add_argument('--version', '-V', action='store_true', help='show the version and exit')
+args = parser.parse_args()
+
+
+# Show version and exit, if requested
+if args.version:
+    print('{}: Version {}'.format(argv[0], VERSION))
+    exit(0)
+
+
+# Parse our config
+if not exists(args.config_file):
+    print('Config file {} does not exist!'.format(args.config_file))
+    exit(1)
+
+configfile = ConfigParser(interpolation=None)  # Interpolation interferes
+                                               # with the format strings
+configfile.optionxform = str  # Preserve case of key names
+configfile.read(args.config_file)
+
+
+# Separate the parsed config into 3 objects, since they're all more-or-less
+# used in separate contexts
+config = configfile['Config']
+display_formats = configfile['DisplayFormats']
+weatherstations = configfile['WeatherStations']
+
+
+# There's overlap between some config options and CLI args. We resolve
+# that overlap here by setting the CLI object to the value of the config
+# object if the CLI argument was not specified.
+if not args.verbose and 'Verbose' in config:
+    args.verbose = configfile.getboolean('Config', 'Verbose')
+
+if not args.log_file and 'LogFile' in config:
+    args.log_file = config['LogFile']
+
+if args.refresh == 300 and 'RefreshInterval' in config:
+    args.refresh = int(config['RefreshInterval'])
+
+
+# Setup logging
+log_ch = logging.StreamHandler()
+log_ch.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+if not args.verbose:
+    log_ch.setLevel(logging.INFO)
+logger.addHandler(log_ch)
+
+if args.log_file:
+    log_fh = logging.FileHandler(args.log_file)
+    log_format = '%(asctime)s [%(name)s] [%(levelname)s] %(message)s'
+    log_fh.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(log_fh)
+
+
+# Setup the environment
+cad = PiFaceCAD()
+stations = [WeatherStation(args.verbose, s, weatherstations[s], args.refresh, config['URLPrefix']) for s in weatherstations]
+weatherdisplay = WeatherDisplay(cad, config['DisplayFormat'], display_formats, stations, args.station, args.verbose)
+
+
+# Setup the SwitchEventListener to handle button presses
+switchlistener = SwitchEventListener(chip=cad)
+switchlistener.register(0, IODIR_ON, print)
+switchlistener.register(1, IODIR_ON, print)
+switchlistener.register(2, IODIR_ON, print)
+switchlistener.register(3, IODIR_ON, print)
+switchlistener.register(4, IODIR_ON, weatherdisplay.change_format)
+switchlistener.register(5, IODIR_ON, weatherdisplay.update)
+switchlistener.register(6, IODIR_ON, weatherdisplay.previous_station)
+switchlistener.register(7, IODIR_ON, weatherdisplay.next_station)
+switchlistener.activate()
+
+
+# Wait until the user exits
+while True:
+    try:
+        weatherdisplay.update()
+        sleep(args.refresh + 1)
+
+    except:
+        e = exc_info()[0]
+        logger.error('Exiting due to %s', e.__name__)
+        logger.exception(e)
+        switchlistener.deactivate()
+        weatherdisplay.close()
+        break
